@@ -1,0 +1,6 @@
+{
+  "name": "HTML Live Editor",
+  "description": "A Word-like visual WYSIWYG editor for HTML files with in-place text and image editing, style preservation, auto-save, and clean file export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
