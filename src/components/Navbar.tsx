@@ -99,7 +99,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+      if (exportMenuRef.current && e.target instanceof Node && !exportMenuRef.current.contains(e.target)) {
         setShowExportMenu(false);
       }
     };
@@ -318,11 +318,14 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Theme Toggle */}
         <button
+          type="button"
+          id="navbar-theme-toggle-btn"
           onClick={onToggleTheme}
-          title={theme === 'dark' ? 'Switch to Light Theme' : 'Switch to Dark Theme'}
-          className="p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
+          title={theme === 'dark' ? 'الوضع النهاري / Switch to Light Mode' : 'الوضع الليلي / Switch to Dark Mode'}
+          aria-label={theme === 'dark' ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'}
+          className="p-2 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition active:scale-95 cursor-pointer focus:outline-hidden focus:ring-2 focus:ring-indigo-500/50"
         >
-          {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
+          {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-700 dark:text-slate-200" />}
         </button>
 
         {/* Export / Download Menu */}

@@ -20,6 +20,7 @@ import {
   Minus,
   RemoveFormatting,
   Palette,
+  Pipette,
   Highlighter,
   ChevronDown,
   Columns,
@@ -36,6 +37,7 @@ import { SelectionInfo } from '../types';
 interface ToolbarProps {
   selectionInfo: SelectionInfo | null;
   onExecuteCommand: (command: string, value?: string) => void;
+  onSaveSelection?: () => void;
   onOpenImageModal: () => void;
   onOpenTableModal: () => void;
   onOpenLinkModal: () => void;
@@ -83,6 +85,7 @@ const SYMBOLS = ['©', '®', '™', '—', '–', '•', '✓', '★', '→', '�
 export const Toolbar: React.FC<ToolbarProps> = ({
   selectionInfo,
   onExecuteCommand,
+  onSaveSelection,
   onOpenImageModal,
   onOpenTableModal,
   onOpenLinkModal,
@@ -101,32 +104,68 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   const [customHighlightColor, setCustomHighlightColor] = useState('#fef08a');
 
   const colorRef = useRef<HTMLDivElement>(null);
+  const colorInputRef = useRef<HTMLInputElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const insertRef = useRef<HTMLDivElement>(null);
   const symbolRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (colorRef.current && !colorRef.current.contains(e.target as Node)) {
+    const handleClickOutside = (e: Event) => {
+      if (e.target instanceof Node) {
+        const target = e.target;
+        if (colorRef.current && !colorRef.current.contains(target)) {
+          setShowColorPicker(false);
+        }
+        if (highlightRef.current && !highlightRef.current.contains(target)) {
+          setShowHighlightPicker(false);
+        }
+        if (headingRef.current && !headingRef.current.contains(target)) {
+          setShowHeadingsDropdown(false);
+        }
+        if (insertRef.current && !insertRef.current.contains(target)) {
+          setShowInsertDropdown(false);
+        }
+        if (symbolRef.current && !symbolRef.current.contains(target)) {
+          setShowSymbolDropdown(false);
+        }
+      } else {
+        // Triggered by iframe click or non-Node event target (e.g. window)
         setShowColorPicker(false);
-      }
-      if (highlightRef.current && !highlightRef.current.contains(e.target as Node)) {
         setShowHighlightPicker(false);
-      }
-      if (headingRef.current && !headingRef.current.contains(e.target as Node)) {
         setShowHeadingsDropdown(false);
-      }
-      if (insertRef.current && !insertRef.current.contains(e.target as Node)) {
         setShowInsertDropdown(false);
-      }
-      if (symbolRef.current && !symbolRef.current.contains(e.target as Node)) {
         setShowSymbolDropdown(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    window.addEventListener('editor-iframe-mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('editor-iframe-mousedown', handleClickOutside);
+    };
   }, []);
+
+  const handleEyeDropper = async () => {
+    onSaveSelection?.();
+    if (typeof window !== 'undefined' && 'EyeDropper' in window) {
+      try {
+        const eyeDropper = new (window as any).EyeDropper();
+        const result = await eyeDropper.open();
+        if (result && result.sRGBHex) {
+          const color = result.sRGBHex;
+          setCustomTextColor(color);
+          onExecuteCommand('foreColor', color);
+          setShowColorPicker(false);
+        }
+      } catch {
+        // EyeDropper cancelled by user (e.g. Escape pressed)
+      }
+    } else {
+      // Graceful fallback if EyeDropper is not supported in this browser
+      colorInputRef.current?.click();
+    }
+  };
 
   const getHeadingLabel = () => {
     if (!selectionInfo) return 'Normal Text';
@@ -152,7 +191,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   // dropdowns are exempt so they still open.
   const handleToolbarMouseDown = (e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
-    if (target.closest('button') && !target.closest('select')) {
+    // Do not prevent default on inputs or select elements so user can type or choose option
+    if (target.closest('input') || target.closest('select')) {
+      return;
+    }
+    // Prevent default on all buttons (including swatches and dropdown toggles) to keep iframe selection alive
+    if (target.closest('button')) {
       e.preventDefault();
     }
   };
@@ -160,7 +204,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   return (
     <div
       onMouseDown={handleToolbarMouseDown}
-      className="bg-slate-50 dark:bg-slate-900/90 border-b border-slate-200 dark:border-slate-800 px-3 py-1.5 flex items-center flex-wrap gap-1 z-20 shrink-0 text-slate-700 dark:text-slate-200 overflow-x-auto shadow-2xs"
+      className="bg-slate-50 dark:bg-slate-900/90 border-b border-slate-200 dark:border-slate-800 px-3 py-1.5 flex items-center flex-wrap gap-1 z-30 shrink-0 text-slate-700 dark:text-slate-200 overflow-visible relative shadow-2xs"
     >
       {/* Font Family Dropdown */}
       <select
@@ -205,7 +249,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         {showHeadingsDropdown && (
-          <div className="absolute left-0 mt-1 w-44 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
+          <div className="absolute left-0 top-full mt-1.5 w-44 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
             <button
               onClick={() => {
                 onExecuteCommand('formatBlock', '<p>');
@@ -344,42 +388,100 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       <div className="relative" ref={colorRef}>
         <button
           type="button"
-          onClick={() => setShowColorPicker(!showColorPicker)}
+          id="toolbar-text-color-btn"
+          onClick={() => {
+            onSaveSelection?.();
+            setShowColorPicker((prev) => {
+              const next = !prev;
+              if (next) {
+                setShowHighlightPicker(false);
+                setShowHeadingsDropdown(false);
+                setShowInsertDropdown(false);
+                setShowSymbolDropdown(false);
+              }
+              return next;
+            });
+          }}
           title="Text Color"
-          className="flex items-center gap-0.5 p-1.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition text-slate-700 dark:text-slate-200"
+          className={`flex items-center gap-0.5 p-1.5 rounded transition cursor-pointer ${
+            showColorPicker
+              ? 'bg-indigo-100 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-300 ring-1 ring-indigo-400/50'
+              : 'hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200'
+          }`}
         >
           <Palette className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           <ChevronDown className="w-2.5 h-2.5 text-slate-400" />
         </button>
 
         {showColorPicker && (
-          <div className="absolute left-0 mt-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl p-3 z-50 text-xs animate-in fade-in duration-100">
-            <div className="text-[11px] font-semibold text-slate-500 mb-2">Text Color</div>
-            <div className="grid grid-cols-6 gap-1.5 mb-2">
+          <div
+            id="toolbar-text-color-dropdown"
+            className="absolute left-0 top-full mt-1.5 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg shadow-2xl p-3 z-50 text-xs animate-in fade-in duration-100"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">Text Color</span>
+              <span className="text-[10px] text-slate-400 font-mono">{customTextColor}</span>
+            </div>
+
+            {/* Eyedropper Button */}
+            <button
+              type="button"
+              id="toolbar-eyedropper-btn"
+              onClick={handleEyeDropper}
+              title="Pick color from screen (Eyedropper)"
+              className="w-full flex items-center justify-center gap-2 py-1.5 px-2 mb-2.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:border-indigo-300 dark:hover:border-indigo-700 hover:text-indigo-600 dark:hover:text-indigo-400 text-slate-700 dark:text-slate-200 transition font-medium text-[11px] cursor-pointer"
+            >
+              <Pipette className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span>Pick from screen (Eyedropper)</span>
+            </button>
+
+            {/* Quick Color Swatches */}
+            <div className="grid grid-cols-6 gap-1.5 mb-2.5">
               {QUICK_COLORS.map((c, i) => (
                 <button
                   key={i}
                   type="button"
+                  id={`quick-color-${i}`}
                   onClick={() => {
+                    setCustomTextColor(c);
                     onExecuteCommand('foreColor', c);
                     setShowColorPicker(false);
                   }}
                   style={{ backgroundColor: c }}
-                  className="w-5 h-5 rounded-sm border border-slate-300 dark:border-slate-700 hover:scale-110 transition"
+                  title={c}
+                  className="w-6 h-6 rounded border border-slate-300 dark:border-slate-700 hover:scale-110 hover:shadow-md transition cursor-pointer"
                 />
               ))}
             </div>
+
+            {/* Custom Color Input Row */}
             <div className="flex items-center gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
               <input
+                ref={colorInputRef}
+                id="toolbar-custom-color-input"
                 type="color"
                 value={customTextColor}
                 onChange={(e) => {
                   setCustomTextColor(e.target.value);
                   onExecuteCommand('foreColor', e.target.value);
                 }}
-                className="w-6 h-6 rounded cursor-pointer border border-slate-300 p-0 bg-transparent"
+                className="w-6 h-6 rounded cursor-pointer border border-slate-300 dark:border-slate-700 p-0 bg-transparent"
+                title="Choose custom color"
               />
-              <span className="text-[11px] text-slate-500">Custom hex</span>
+              <input
+                type="text"
+                id="toolbar-custom-color-hex"
+                value={customTextColor}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCustomTextColor(val);
+                  if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+                    onExecuteCommand('foreColor', val);
+                  }
+                }}
+                placeholder="#000000"
+                className="flex-1 text-[11px] font-mono px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200"
+              />
             </div>
           </div>
         )}
@@ -398,7 +500,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         {showHighlightPicker && (
-          <div className="absolute left-0 mt-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl p-3 z-50 text-xs animate-in fade-in duration-100">
+          <div className="absolute left-0 top-full mt-1.5 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl p-3 z-50 text-xs animate-in fade-in duration-100">
             <div className="text-[11px] font-semibold text-slate-500 mb-2">Highlight Color</div>
             <div className="grid grid-cols-4 gap-1.5 mb-2">
               {QUICK_HIGHLIGHTS.map((c, i) => (
@@ -547,7 +649,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         {showInsertDropdown && (
-          <div className="absolute left-0 mt-1 w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl py-1.5 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
+          <div className="absolute left-0 top-full mt-1.5 w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl py-1.5 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
             <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
               Callout Alert Boxes
             </div>
@@ -640,7 +742,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         {showSymbolDropdown && (
-          <div className="absolute right-0 mt-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-xl p-2.5 z-50 text-xs animate-in fade-in duration-100">
+          <div className="absolute right-0 top-full mt-1.5 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl p-2.5 z-50 text-xs animate-in fade-in duration-100">
             <div className="text-[11px] font-semibold text-slate-500 mb-1.5">Insert Symbol</div>
             <div className="grid grid-cols-6 gap-1">
               {SYMBOLS.map((s, i) => (

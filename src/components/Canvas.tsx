@@ -27,6 +27,7 @@ import { sanitizeHtmlFragment } from '../services/sanitize';
 
 export interface CanvasHandle {
   executeCommand: (command: string, value?: string) => void;
+  saveSelection: () => void;
   insertImage: (attributes: ImageAttributes) => void;
   insertTable: (options: { rows: number; cols: number; headerRow: boolean; bordered: boolean; striped: boolean }) => void;
   insertLink: (attributes: { url: string; text: string; openInNewTab: boolean }) => void;
@@ -107,6 +108,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
   // Snapshot of caret + selection captured when an insert flow opens (modals
   // steal focus; we must remember WHERE to put the table/image/link).
   const savedInsertRangeRef = useRef<{ range: Range | null; selectedText: string }>({ range: null, selectedText: '' });
+  // Continuous active range tracker inside the iframe document
+  const lastActiveRangeRef = useRef<{ range: Range | null; element: HTMLElement | null }>({ range: null, element: null });
+  // Specific non-collapsed text selection tracker (guarantees text selection isn't lost on toolbar clicks)
+  const lastNonCollapsedRangeRef = useRef<{ range: Range; text: string; element: HTMLElement | null } | null>(null);
   const composingRef = useRef(false);
 
   // Live props bridge so long-lived iframe listeners always call the freshest
@@ -280,11 +285,38 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
   };
 
   const attachEditingListeners = useCallback((win: Window, doc: Document) => {
+    // Update our continuous selection snapshot whenever user edits, moves cursor, or selects text
+    const updateActiveSelection = () => {
+      const sel = win.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const r = sel.getRangeAt(0);
+        if (doc.body.contains(r.commonAncestorContainer)) {
+          const resolvedEl = resolveSelectionElement(doc) || selectedElementRef.current;
+          lastActiveRangeRef.current = {
+            range: r.cloneRange(),
+            element: resolvedEl,
+          };
+          savedInsertRangeRef.current = {
+            range: r.cloneRange(),
+            selectedText: sel.isCollapsed ? '' : sel.toString(),
+          };
+          if (!sel.isCollapsed && sel.toString().length > 0) {
+            lastNonCollapsedRangeRef.current = {
+              range: r.cloneRange(),
+              text: sel.toString(),
+              element: resolvedEl,
+            };
+          }
+        }
+      }
+    };
+
     // Selection tracking → overlay box, inspector, breadcrumbs.
     doc.addEventListener('selectionchange', () => {
       if (composingRef.current) return;
       const el = resolveSelectionElement(doc);
       updateSelectionStateRef.current(el);
+      updateActiveSelection();
       const infoEl = el ?? selectedElementRef.current;
       if (!el && selectedElementRef.current && !VOID_SELECTABLE_TAGS.has(selectedElementRef.current.tagName)) {
         // Text selection dissolved entirely (clicked whitespace) — drop the
@@ -304,6 +336,17 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
       if (target && VOID_SELECTABLE_TAGS.has(target.tagName)) {
         updateSelectionStateRef.current(target);
       }
+      updateActiveSelection();
+      // Notify top window to close any open toolbar dropdowns when user clicks in the canvas
+      window.dispatchEvent(new CustomEvent('editor-iframe-mousedown'));
+    });
+
+    doc.addEventListener('mouseup', () => {
+      updateActiveSelection();
+    });
+
+    doc.addEventListener('keyup', () => {
+      updateActiveSelection();
     });
 
     // Text edits → snapshot into App state ('text' kind merges bursts so a
@@ -611,7 +654,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
 
   // ---- Imperative API shared plumbing -------------------------------------
   /** Focus the iframe and re-apply a selection snapshot saved by an insert
-   *  flow (modals steal DOM focus; this brings the caret back). */
+   *  flow or toolbar action (modals/toolbars steal DOM focus; this brings the caret back). */
   const restoreSavedSelection = (): boolean => {
     const win = iframeRef.current?.contentWindow;
     const doc = win?.document;
@@ -622,7 +665,23 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
 
     const liveValid =
       sel.rangeCount > 0 && doc.body.contains(sel.getRangeAt(0).commonAncestorContainer);
-    if (liveValid) return true;
+    if (liveValid && !sel.isCollapsed) return true;
+
+    // Prioritize non-collapsed text selection if available
+    const nonCollapsed = lastNonCollapsedRangeRef.current?.range;
+    if (nonCollapsed && doc.body.contains(nonCollapsed.startContainer) && !nonCollapsed.collapsed) {
+      sel.removeAllRanges();
+      sel.addRange(nonCollapsed.cloneRange());
+      return true;
+    }
+
+    // Check lastActiveRangeRef (continuous selection from iframe)
+    const active = lastActiveRangeRef.current.range;
+    if (active && doc.body.contains(active.startContainer)) {
+      sel.removeAllRanges();
+      sel.addRange(active.cloneRange());
+      return true;
+    }
 
     const saved = savedInsertRangeRef.current.range;
     if (saved && doc.body.contains(saved.startContainer)) {
@@ -630,8 +689,36 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
       sel.addRange(saved.cloneRange());
       return true;
     }
-    return false;
+    return liveValid;
   };
+
+  const snapshotActiveSelection = useCallback(() => {
+    const win = iframeRef.current?.contentWindow;
+    const doc = win?.document;
+    if (!win || !doc || !doc.body) return;
+    const sel = win.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0);
+      if (doc.body.contains(r.commonAncestorContainer)) {
+        const resolvedEl = resolveSelectionElement(doc) || selectedElementRef.current;
+        lastActiveRangeRef.current = {
+          range: r.cloneRange(),
+          element: resolvedEl,
+        };
+        savedInsertRangeRef.current = {
+          range: r.cloneRange(),
+          selectedText: sel.isCollapsed ? '' : sel.toString(),
+        };
+        if (!sel.isCollapsed && sel.toString().length > 0) {
+          lastNonCollapsedRangeRef.current = {
+            range: r.cloneRange(),
+            text: sel.toString(),
+            element: resolvedEl,
+          };
+        }
+      }
+    }
+  }, []);
 
   /**
    * Block-level anchor (direct body child) receiving "after-block" structural
@@ -704,6 +791,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
 
   // Expose imperative API for toolbar and actions
   useImperativeHandle(ref, () => ({
+    saveSelection: snapshotActiveSelection,
+
     executeCommand: (command: string, value?: string) => {
       const doc = iframeRef.current?.contentDocument;
       const win = iframeRef.current?.contentWindow;
@@ -742,13 +831,115 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
             doc.execCommand('fontSize', false, value); // graceful fallback
           }
         }
+      } else if (command === 'foreColor' && value) {
+        restoreSavedSelection();
+        const sel = win.getSelection();
+        const hasTextSelection = sel && sel.rangeCount > 0 && !sel.isCollapsed;
+
+        if (hasTextSelection) {
+          try {
+            doc.execCommand('styleWithCSS', false, 'true');
+          } catch {
+            // ignore
+          }
+          const success = doc.execCommand('foreColor', false, value);
+          // Clean up any legacy <font color="..."> elements to modern <span style="color: ...">
+          const fontTags = doc.querySelectorAll('font[color]');
+          fontTags.forEach((f) => {
+            const span = doc.createElement('span');
+            span.style.color = f.getAttribute('color') || value;
+            while (f.firstChild) {
+              span.appendChild(f.firstChild);
+            }
+            f.replaceWith(span);
+          });
+          if (!success) {
+            try {
+              const range = sel.getRangeAt(0);
+              const span = doc.createElement('span');
+              span.style.color = value;
+              span.appendChild(range.extractContents());
+              range.insertNode(span);
+              sel.removeAllRanges();
+              const r2 = doc.createRange();
+              r2.selectNodeContents(span);
+              sel.addRange(r2);
+            } catch (e) {
+              console.warn('Fallback span color wrap failed', e);
+            }
+          }
+        } else {
+          // No highlighted range: apply color directly to selected element or current caret block
+          const targetEl =
+            selectedElementRef.current ||
+            lastActiveRangeRef.current.element ||
+            (sel && sel.rangeCount > 0
+              ? sel.getRangeAt(0).startContainer.nodeType === 3
+                ? sel.getRangeAt(0).startContainer.parentElement
+                : (sel.getRangeAt(0).startContainer as HTMLElement)
+              : null);
+
+          if (targetEl && targetEl !== doc.body && targetEl !== doc.documentElement) {
+            targetEl.style.color = value;
+            if (!selectedElementRef.current) {
+              setSelectedElement(targetEl);
+            }
+          }
+        }
+      } else if (command === 'hiliteColor' && value) {
+        restoreSavedSelection();
+        const sel = win.getSelection();
+        const hasTextSelection = sel && sel.rangeCount > 0 && !sel.isCollapsed;
+
+        if (hasTextSelection) {
+          try {
+            doc.execCommand('styleWithCSS', false, 'true');
+          } catch {
+            // ignore
+          }
+          const success = doc.execCommand('hiliteColor', false, value);
+          if (!success) {
+            try {
+              const range = sel.getRangeAt(0);
+              const span = doc.createElement('span');
+              span.style.backgroundColor = value === 'transparent' ? '' : value;
+              span.appendChild(range.extractContents());
+              range.insertNode(span);
+              sel.removeAllRanges();
+              const r2 = doc.createRange();
+              r2.selectNodeContents(span);
+              sel.addRange(r2);
+            } catch (e) {
+              console.warn('Fallback span highlight wrap failed', e);
+            }
+          }
+        } else {
+          const targetEl =
+            selectedElementRef.current ||
+            lastActiveRangeRef.current.element ||
+            (sel && sel.rangeCount > 0
+              ? sel.getRangeAt(0).startContainer.nodeType === 3
+                ? sel.getRangeAt(0).startContainer.parentElement
+                : (sel.getRangeAt(0).startContainer as HTMLElement)
+              : null);
+
+          if (targetEl && targetEl !== doc.body && targetEl !== doc.documentElement) {
+            targetEl.style.backgroundColor = value === 'transparent' ? '' : value;
+            if (!selectedElementRef.current) {
+              setSelectedElement(targetEl);
+            }
+          }
+        }
       } else {
         doc.execCommand(command, false, value || undefined);
       }
 
       commitInternalChange('bound');
       const el = selectedElementRef.current;
-      if (el && el.isConnected) setSelectedRect(measureRef.current(el));
+      if (el && el.isConnected) {
+        setSelectedRect(measureRef.current(el));
+        updateSelectionState(el);
+      }
     },
 
 

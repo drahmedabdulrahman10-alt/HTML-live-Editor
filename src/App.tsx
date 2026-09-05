@@ -640,6 +640,7 @@ export default function App() {
       <Toolbar
         selectionInfo={selectionInfo}
         onExecuteCommand={(cmd, val) => canvasRef.current?.executeCommand(cmd, val)}
+        onSaveSelection={() => canvasRef.current?.saveSelection()}
         onOpenImageModal={openImageModal}
         onOpenTableModal={openTableModal}
         onOpenLinkModal={openLinkModal}
