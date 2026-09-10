@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { ViewMode, DevicePreset, SelectionInfo, ImageAttributes, ShortcutAction } from '../types';
 import { sanitizeHtmlFragment } from '../services/sanitize';
+import { ImageTransformer } from './ImageTransformer';
 
 export interface CanvasHandle {
   executeCommand: (command: string, value?: string) => void;
@@ -96,7 +97,6 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
   const [selectedRect, setSelectedRect] = useState<ElementRect | null>(null);
   const [tagPath, setTagPath] = useState<HTMLElement[]>([]);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
-  const initialResizeState = useRef<{ startX: number; startY: number; startW: number; startH: number; aspectRatio: number } | null>(null);
 
   // ---- Sync engine state -------------------------------------------------
   // The HTML string we last emitted (or loaded). The iframe is REWRITTEN only
@@ -148,6 +148,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
   const getIframeHtml = useCallback((): string => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return '';
+    // Clean any temporary drop indicator before serializing
+    const dropIndicators = doc.querySelectorAll('[data-editor-drop-indicator]');
+    dropIndicators.forEach((el) => el.remove());
+
     const doctype = doc.doctype !== null ? '<!DOCTYPE html>\n' : '';
     return doctype + doc.documentElement.outerHTML.replace(
       /<style data-editor-internal(?:="[^"]*")?>[\s\S]*?<\/style>/g,
@@ -329,11 +333,26 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
       }
     });
 
+    // Disable native ghost dragging on all existing and newly clicked images
+    doc.querySelectorAll('img').forEach((img) => {
+      img.setAttribute('draggable', 'false');
+    });
+
+    doc.addEventListener('dragstart', (e: DragEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && target.tagName?.toLowerCase() === 'img') {
+        e.preventDefault();
+      }
+    });
+
     // Click: pick up void elements (images, tables, rules) which never appear
     // inside a text Range; other clicks resolve via selectionchange.
     doc.addEventListener('mousedown', (e) => {
       const target = e.target as HTMLElement;
       if (target && VOID_SELECTABLE_TAGS.has(target.tagName)) {
+        if (target.tagName.toLowerCase() === 'img') {
+          target.setAttribute('draggable', 'false');
+        }
         updateSelectionStateRef.current(target);
       }
       updateActiveSelection();
@@ -450,6 +469,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
         reader.onload = (ev) => {
           if (!ev.target?.result) return;
           const img = doc.createElement('img');
+          img.setAttribute('draggable', 'false');
           img.src = ev.target.result as string;
           img.alt = file.name;
           img.style.maxWidth = '100%';
@@ -578,78 +598,6 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
     window.addEventListener('resize', handleMeasure);
     return () => window.removeEventListener('resize', handleMeasure);
   }, [zoom, viewMode, devicePreset, measureElementInWrapper]);
-
-
-  // Image Resize Drag Handler
-  const startImageResize = (e: React.MouseEvent, handle: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!selectedElement || selectedElement.tagName.toLowerCase() !== 'img') return;
-
-    const img = selectedElement as HTMLImageElement;
-    const startW = img.offsetWidth;
-    const startH = img.offsetHeight;
-
-    initialResizeState.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      startW,
-      startH,
-      aspectRatio: startW / (startH || 1),
-    };
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!initialResizeState.current) return;
-      const { startX, startY, startW, startH, aspectRatio } = initialResizeState.current;
-      // Deltas arrive in parent-document space; convert to iframe space using
-      // the current page-mode zoom so resizing feels 1:1 at any zoom level.
-      const scale = zoom / 100 || 1;
-      const deltaX = (moveEvent.clientX - startX) / scale;
-      const deltaY = (moveEvent.clientY - startY) / scale;
-
-      let newW = startW;
-      let newH = startH;
-
-      if (handle.includes('e')) newW = startW + deltaX;
-      if (handle.includes('w')) newW = startW - deltaX;
-      if (handle.includes('s')) newH = startH + deltaY;
-      if (handle.includes('n')) newH = startH - deltaY;
-
-      // Lock aspect ratio with Shift key or diagonal handles
-      if (moveEvent.shiftKey || (handle.length === 2 && !moveEvent.altKey)) {
-        if (handle.includes('e') || handle.includes('w')) {
-          newH = newW / aspectRatio;
-        } else {
-          newW = newH * aspectRatio;
-        }
-      }
-
-      newW = Math.max(30, Math.round(newW));
-      newH = Math.max(30, Math.round(newH));
-
-      img.style.width = `${newW}px`;
-      img.style.height = `${newH}px`;
-      img.width = newW;
-      img.height = newH;
-
-      setImageDimensions({ width: newW, height: newH });
-      setSelectedRect(measureRef.current(img));
-    };
-
-    const onMouseUp = () => {
-      initialResizeState.current = null;
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-
-      // Commit the resized image as an atomic undo step, with the echo-gate
-      // armed so this emission can never trigger a document reload.
-      setSelectedRect(measureRef.current(img));
-      commitInternalChange('bound');
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
 
 
   // ---- Imperative API shared plumbing -------------------------------------
@@ -951,6 +899,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
       restoreSavedSelection();
 
       const img = doc.createElement('img');
+      img.setAttribute('draggable', 'false');
       img.src = attrs.src;
       img.alt = attrs.alt;
       if (attrs.width) img.style.width = typeof attrs.width === 'number' ? `${attrs.width}px` : attrs.width;
@@ -1387,7 +1336,36 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
           />
 
           {/* Element Selection Highlight Overlay & Floating Actions */}
-          {selectedRect && selectedElement && (
+          {selectedElement && selectedElement.tagName.toLowerCase() === 'img' ? (
+            <ImageTransformer
+              imageElement={selectedElement as HTMLImageElement}
+              iframeRef={iframeRef}
+              zoom={zoom}
+              viewMode={viewMode}
+              onTransformStart={() => {
+                // Focus/contentEditable isolation handled in ImageTransformer
+              }}
+              onTransformEnd={() => {
+                // Debounce undo/redo state: push to history stack only on pointerup
+                commitInternalChange('bound');
+                if (selectedElement && selectedElement.isConnected) {
+                  setSelectedRect(measureRef.current(selectedElement));
+                  updateSelectionState(selectedElement);
+                }
+              }}
+              onUpdate={() => {
+                if (selectedElement && selectedElement.isConnected) {
+                  const img = selectedElement as HTMLImageElement;
+                  setImageDimensions({ width: img.offsetWidth, height: img.offsetHeight });
+                }
+              }}
+              onDelete={performDelete}
+              onDuplicate={performDuplicate}
+              onOpenStyleModal={onOpenStyleModal}
+              onOpenHtmlModal={onOpenHtmlModal}
+              onMoveElement={performMove}
+            />
+          ) : selectedRect && selectedElement ? (
             <div
               className="absolute pointer-events-none transition-all duration-75 border-2 border-indigo-600 rounded-sm z-30"
               style={{
@@ -1473,46 +1451,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(({
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
-
-              {/* Image Resize Handles (If selected element is an image) */}
-              {selectedElement.tagName.toLowerCase() === 'img' && (
-                <>
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'nw')}
-                    className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nwse-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'n')}
-                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ns-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'ne')}
-                    className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nesw-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'e')}
-                    className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ew-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'se')}
-                    className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nwse-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 's')}
-                    className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ns-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'sw')}
-                    className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nesw-resize pointer-events-auto shadow-sm"
-                  />
-                  <div
-                    onMouseDown={(e) => startImageResize(e, 'w')}
-                    className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ew-resize pointer-events-auto shadow-sm"
-                  />
-                </>
-              )}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
 

@@ -9,6 +9,13 @@ export function cleanHtmlForExport(rawHtml: string): string {
   const parser = new DOMParser();
   const doc = parser.parseFromString(rawHtml, 'text/html');
 
+  // Remove any drop indicators or editor UI injected into document
+  const dropIndicators = doc.querySelectorAll('[data-editor-drop-indicator]');
+  dropIndicators.forEach((el) => el.remove());
+
+  const editorUI = doc.querySelectorAll('[data-editor-ui], .image-transformer-overlay, .resize-handle');
+  editorUI.forEach((ui) => ui.remove());
+
   // Remove editor-specific attributes and elements
   const allElements = doc.querySelectorAll('*');
   allElements.forEach((el) => {
@@ -17,14 +24,21 @@ export function cleanHtmlForExport(rawHtml: string): string {
     el.removeAttribute('data-editor-selected');
     el.removeAttribute('data-editor-hover');
     el.removeAttribute('data-editor-highlight');
-    
+    el.removeAttribute('data-editor-drop-indicator');
+
     // Remove editor-specific classes if any were added
-    if (el.classList.contains('live-editor-active-element')) {
-      el.classList.remove('live-editor-active-element');
+    el.classList.remove(
+      'live-editor-active-element',
+      'live-editor-hover-element',
+      'editor-selected-img',
+      'resize-handle'
+    );
+
+    // If draggable was set to false by editor, clean it if desired
+    if (el.getAttribute('draggable') === 'false' && el.tagName.toLowerCase() === 'img') {
+      el.removeAttribute('draggable');
     }
-    if (el.classList.contains('live-editor-hover-element')) {
-      el.classList.remove('live-editor-hover-element');
-    }
+
     if (el.getAttribute('class') === '') {
       el.removeAttribute('class');
     }
@@ -32,11 +46,7 @@ export function cleanHtmlForExport(rawHtml: string): string {
 
   // Remove any injected editor style tags
   const editorStyles = doc.querySelectorAll('style[data-editor-internal]');
-  editorStyles.forEach(s => s.remove());
-
-  // Remove any injected editor overlays or scripts
-  const editorUI = doc.querySelectorAll('[data-editor-ui]');
-  editorUI.forEach(ui => ui.remove());
+  editorStyles.forEach((s) => s.remove());
 
   // Check if original had doctype
   const hasDoctype = rawHtml.trim().toLowerCase().startsWith('<!doctype html');
